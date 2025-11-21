@@ -180,6 +180,7 @@ void BusSnooper() {
   unsigned requester;
   int procId;
   int i;
+  int blkmask;
 
   procId = ActivityArgSize(ME); // Id of this Snooper
   if (TRACE)
@@ -197,6 +198,7 @@ void BusSnooper() {
   busreq_type = BROADCAST_CMD.reqtype;
   blkNum =  (address >> BLKSIZE)% CACHESIZE;
   broadcast_tag = (address >> BLKSIZE)/ CACHESIZE;
+  blkmask = (-1 << BLKSIZE);
 
 
     if (BUS_GRANT[procId] == TRUE)  { // My own Front End  initiated this request
@@ -236,32 +238,70 @@ void BusSnooper() {
     //  Handle the three possible requests initiated by my own front end.
 
     switch (busreq_type) {  
-    case (INV): {
-      // Handle INV. Update the  status bits of the cache block.
-      }
-      break;
-    
-    case (BUS_RD): {
+        case (INV): {
+            // Handle INV. Update the  status bits of the cache block.
+            if (CACHE[procId][blkNum].STATE == SM || CACHE[procId][blkNum].STATE == OM) {
+                // Upgrade privilege
+                CACHE[procId][blkNum].STATE = M;
+            }
+        }
+        break;
+        
+        case (BUS_RD): {
+        /* 
+        1. Perform a writeback if needed and update the DIRTY bit. 
+        2. Set the cache tag for the new block and read the value into cache. Update my 
+            "numCacheToCacheTransfer" or "numMemToCacheTransfer" counter as appropriate.
+        3. Set the status bits  of the new cache block.
+        */ 
+            // Writeback if block is 'exclusive' or in transient state
+            if (CACHE[procId][blkNum].DIRTY && CACHE[procId][blkNum].STATE != I && CACHE[procId][blkNum].STATE != S) {
+                doWriteback(procId, blkNum);
+                CACHE[procId][blkNum].DIRTY = FALSE;
+                cache_writebacks[procId]++;
+            }
+            CACHE[procId][blkNum].TAG = broadcast_tag;
+            if (OFlag) {
+                numCacheToCacheTransfer[procId]++;
+                receiveCacheTransfer();
+            } else {
+                numMemToCacheTransfer[procId]++;
+                receiveMemTransfer(procId, blkNum, address & blkmask);
+            }
+            if (PFlag) {
+                CACHE[procId][blkNum].STATE = S;
+            } else {
+                CACHE[procId][blkNum].STATE = E;
+            }
 
-      /* 
-	 1. Perform a writeback if needed and update the DIRTY bit. 
-	 2. Set the cache tag for the new block and read the value into cache. Update my 
-	    "numCacheToCacheTransfer" or "numMemToCacheTransfer" counter as appropriate.
-	 3. Set the status bits  of the new cache block.
-      */
-    }
-      break;
-      
-    case BUS_RDX: { 
-    
-      /* 
-	 1. If necessary write back the block using doWriteback() and set the DIRTY bit to FALSE.
-	 2. Set the cache tag for the new block and read the value into cache. Update my 
-	    "numCacheToCacheTransfer" or "numMemToCacheTransfer" counter as appropriate.
-	 3. Set the status bots of the new cache block.
-      */ 
-    }
-      break;
+        }
+        break;
+        
+        case BUS_RDX: { 
+        
+        /* 
+        1. If necessary write back the block using doWriteback() and set the DIRTY bit to FALSE.
+        2. Set the cache tag for the new block and read the value into cache. Update my 
+            "numCacheToCacheTransfer" or "numMemToCacheTransfer" counter as appropriate.
+        3. Set the status bots of the new cache block.
+        */ 
+            if (CACHE[procId][blkNum].DIRTY && CACHE[procId][blkNum].STATE != I && CACHE[procId][blkNum].STATE != S) {
+                doWriteback(procId, blkNum);
+                CACHE[procId][blkNum].DIRTY = FALSE;
+                cache_writebacks[procId]++;
+            }
+            CACHE[procId][blkNum].TAG = broadcast_tag;
+            if (OFlag) {
+                numCacheToCacheTransfer[procId]++;
+                receiveCacheTransfer();
+            } else {
+                numMemToCacheTransfer[procId]++;
+                receiveMemTransfer(procId, blkNum, address & blkmask);
+            }
+            CACHE[procId][blkNum].STATE = M;
+            CACHE[procId][blkNum].DIRTY = TRUE;
+        }
+        break;
     }
     
     ProcessDelay(CLOCK_CYCLE);
@@ -277,36 +317,76 @@ void BusSnooper() {
 
     /*  1. Set my PBit  and OBit appropriately */
 
+    PBit[procId] = FALSE;
+    OBit[procId] = FALSE;  
+
+    ProcessDelay(epsilon);
+
+    PFlag = wireOR(PBit);
+    OFlag = wireOR(OBit);
+
     /*  Handle the case if the block is not  in my cache */
+    if (CACHE[procId][blkNum].TAG != broadcast_tag || CACHE[procId][blkNum].STATE == I) {
+        // printf("not matching tag\n");
+        SemaphoreSignal(sem_bussnoopdone[procId]);   // Uncomment Signal for actual code
+        continue;
+    }
 
   switch (busreq_type) { // Handling command from some other processor for a block in my cache
   
-  case (INV):
-    /* Update state of cache block. If a race is detected update statistics counters:
-       "cache_write_misses", "cache_upgrades", and "converted_cache_upgrades"
-    */
-    
-    break;
-    
-    
-  case (BUS_RD): 
-    /* Handle received BUS_RD based on the state of my  cache block
-     1. Update new cache state as needed using atomicUpdate()
-     2. Use sendCacheTransfer() if you are the source of a cache-to-cache transfer
-    */
+    case (INV): {
+        /* Update state of cache block. If a race is detected update statistics counters:
+        "cache_write_misses", "cache_upgrades", and "converted_cache_upgrades"
+        */
+        if (CACHE[procId][blkNum].STATE == M) {
+            cache_write_misses[procId]++;
+            cache_upgrades[procId]++;
+            converted_cache_upgrades[procId]++;
+        } else if (CACHE[procId][blkNum].STATE == O) {
+            cache_write_misses[procId]++;
+            cache_upgrades[procId]++;
+        } else if (CACHE[procId][blkNum].STATE == E) {
+            cache_write_misses[procId]++;
+            cache_upgrades[procId]++;
+        }
+        CACHE[procId][blkNum].STATE = I;
+    }
 
     
     break;
+    
+    
+    case (BUS_RD): {
+        /* Handle received BUS_RD based on the state of my  cache block
+        1. Update new cache state as needed using atomicUpdate()
+        2. Use sendCacheTransfer() if you are the source of a cache-to-cache transfer
+        */
+       if (CACHE[procId][blkNum].STATE == M) {
+        atomicUpdate(procId, blkNum, O);
+        sendCacheTransfer(procId, getRequester(), blkNum);
+       } else if (CACHE[procId][blkNum].STATE == O || CACHE[procId][blkNum].STATE == E) {
+        sendCacheTransfer(procId, getRequester(), blkNum);
+       }    
+    
+    }
+
+    break;
 
 
-   case (BUS_RDX): 
-
-    /* Handle received BUS_RDX based on the state of my cache block
-     1. Update new cache state as needed using atomicUpdate()
-     2. Use sendCacheTransfer() if you are the source of a cache-to-cache transfer
-     3. Update statistics: "cache_write_misses", "cache_upgrades", and "converted_cache_upgrades"
-       as needed.
-    */
+    case (BUS_RDX): {
+        /* Handle received BUS_RDX based on the state of my cache block
+        1. Update new cache state as needed using atomicUpdate()
+        2. Use sendCacheTransfer() if you are the source of a cache-to-cache transfer
+        3. Update statistics: "cache_write_misses", "cache_upgrades", and "converted_cache_upgrades"
+        as needed.
+        */
+        if (CACHE[procId][blkNum].STATE == M || CACHE[procId][blkNum].STATE == O || CACHE[procId][blkNum].STATE == E) {
+            atomicUpdate(procId, blkNum, I);
+            sendCacheTransfer(procId, getRequester(), blkNum);
+        } else {
+            atomicUpdate(procId, blkNum, I);
+        }
+    }
 
      break;
   }
@@ -321,7 +401,7 @@ if (BUSTRACE)
 /* *********************************************************************************************
 Bus Arbiter checks for an asserted  BUS_REQUEST signal every clock cycle.
 *********************************************************************************************/
-void BusArbiter(){
+void BusArbiter() {
   int job_num, i;
 static int procId = 0;
 
