@@ -203,8 +203,8 @@ void BusSnooper() {
 
     if (BUS_GRANT[procId] == TRUE)  { // My own Front End  initiated this request
   
-    PBit[procId] = FALSE;
-    OBit[procId] = FALSE;  
+    PBit[procId] = CACHE[procId][blkNum].TAG == broadcast_tag && CACHE[procId][blkNum].STATE != I;
+    OBit[procId] = CACHE[procId][blkNum].TAG == broadcast_tag && (CACHE[procId][blkNum].STATE == O || CACHE[procId][blkNum].STATE == E || CACHE[procId][blkNum].STATE == M);  
 
     ProcessDelay(epsilon);
 
@@ -260,11 +260,15 @@ void BusSnooper() {
                 CACHE[procId][blkNum].DIRTY = FALSE;
                 cache_writebacks[procId]++;
             }
+            // printf("BUS_RD from self on proc %i\n", procId);
             CACHE[procId][blkNum].TAG = broadcast_tag;
             if (OFlag) {
                 numCacheToCacheTransfer[procId]++;
+                // printf("Process %i requesting cache transfer\n", procId);
                 receiveCacheTransfer();
+                // printf("Process %i successfully received transfer\n", procId);
             } else {
+                // printf("Process %i requesting memory transfer\n", procId);
                 numMemToCacheTransfer[procId]++;
                 receiveMemTransfer(procId, blkNum, address & blkmask);
             }
@@ -317,8 +321,8 @@ void BusSnooper() {
 
     /*  1. Set my PBit  and OBit appropriately */
 
-    PBit[procId] = FALSE;
-    OBit[procId] = FALSE;  
+    PBit[procId] = CACHE[procId][blkNum].TAG == broadcast_tag && CACHE[procId][blkNum].STATE != I;
+    OBit[procId] = CACHE[procId][blkNum].TAG == broadcast_tag && (CACHE[procId][blkNum].STATE == O || CACHE[procId][blkNum].STATE == E || CACHE[procId][blkNum].STATE == M);  
 
     ProcessDelay(epsilon);
 
@@ -327,8 +331,9 @@ void BusSnooper() {
 
     /*  Handle the case if the block is not  in my cache */
     if (CACHE[procId][blkNum].TAG != broadcast_tag || CACHE[procId][blkNum].STATE == I) {
-        // printf("not matching tag\n");
-        SemaphoreSignal(sem_bussnoopdone[procId]);   // Uncomment Signal for actual code
+        // printf("not matching tag or block invalid in proc %i\n", procId);
+        ProcessDelay(CLOCK_CYCLE);  
+        SemaphoreSignal(sem_bussnoopdone[procId]); 
         continue;
     }
 
@@ -365,6 +370,7 @@ void BusSnooper() {
         atomicUpdate(procId, blkNum, O);
         sendCacheTransfer(procId, getRequester(), blkNum);
        } else if (CACHE[procId][blkNum].STATE == O || CACHE[procId][blkNum].STATE == E) {
+        atomicUpdate(procId, blkNum, S);
         sendCacheTransfer(procId, getRequester(), blkNum);
        }    
     
